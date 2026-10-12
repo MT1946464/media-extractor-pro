@@ -2,47 +2,46 @@
   "manifest_version": 3,
   "name": "Image & Video Extractor",
   "short_name": "HTML Media Extractor",
-  "version": "2.0.0",
-  "version_name": "2.0.0",
+  "version": "2.1.0",
+  "version_name": "2.1.0",
   "description": "Extract, preview, and download standard HTML images and videos from web pages. Works with publicly embedded media elements only.",
   "author": "Jahidul Islam",
   "homepage_url": "https://www.unifiedtoolspro.xyz/",
-  "minimum_chrome_version": "102",
-
+  "minimum_chrome_version": "116",
   "permissions": [
     "activeTab",
     "scripting",
     "downloads",
     "tabs",
-    "contextMenus"
+    "contextMenus",
+    "storage",
+    "offscreen"
   ],
-
+  "host_permissions": [
+    "<all_urls>"
+  ],
   "action": {
     "default_popup": "popup/popup.html",
     "default_icon": {
-      "16":  "icons/icon16.png",
-      "32":  "icons/icon32.png",
-      "48":  "icons/icon48.png",
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png",
+      "48": "icons/icon48.png",
       "128": "icons/icon128.png"
     },
     "default_title": "Media Extractor Pro",
     "default_badge_text": ""
   },
-
   "background": {
     "service_worker": "background/service-worker.js",
     "type": "module"
   },
-
   "icons": {
-    "16":  "icons/icon16.png",
-    "32":  "icons/icon32.png",
-    "48":  "icons/icon48.png",
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
     "128": "icons/icon128.png"
   },
-
   "content_security_policy": {
     "extension_pages": "script-src 'self'; object-src 'self'"
   }
 }
-

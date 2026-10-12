@@ -253,3 +253,169 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
   }
 });
 
+
+
+// =============================================
+// Background Download Jobs (ZIP / bulk files)
+// The heavy lifting runs in an offscreen document so it keeps
+// going after the popup closes. Job state lives in
+// chrome.storage.session so the popup can show progress when reopened.
+// =============================================
+const JOB_KEY       = 'mepJob';
+const BLOBS_KEY     = 'mepBlobDownloads';
+const OFFSCREEN_URL = 'background/offscreen.html';
+let creatingOffscreen = null;
+
+async function hasOffscreen() {
+  if (!chrome.runtime.getContexts) return false;
+  const ctx = await chrome.runtime.getContexts({
+    contextTypes: ['OFFSCREEN_DOCUMENT'],
+    documentUrls: [chrome.runtime.getURL(OFFSCREEN_URL)]
+  });
+  return ctx.length > 0;
+}
+
+async function ensureOffscreen() {
+  if (await hasOffscreen()) return;
+  if (!creatingOffscreen) {
+    creatingOffscreen = chrome.offscreen.createDocument({
+      url: OFFSCREEN_URL,
+      reasons: ['BLOBS'],
+      justification: 'Fetch media and build ZIP archives in the background'
+    }).finally(() => { creatingOffscreen = null; });
+  }
+  await creatingOffscreen;
+}
+
+async function getJob() {
+  const data = await chrome.storage.session.get(JOB_KEY);
+  return data[JOB_KEY] || null;
+}
+
+// Serialize read-modify-write updates so rapid progress messages don't clobber each other
+let jobWriteChain = Promise.resolve();
+function updateJob(patch) {
+  jobWriteChain = jobWriteChain.then(async () => {
+    const job = (await getJob()) || {};
+    const next = { ...job, ...patch, updatedAt: Date.now() };
+    if (patch.phase && patch.phase !== job.phase && !('percentOverride' in patch)) delete next.percentOverride;
+    await chrome.storage.session.set({ [JOB_KEY]: next });
+    setJobBadge(next);
+    if (['done', 'error', 'cancelled'].includes(next.state)) maybeCloseOffscreen();
+    return next;
+  }).catch(err => console.warn('[MEP] job update failed:', err));
+  return jobWriteChain;
+}
+
+function setJobBadge(job) {
+  const tabId = job.tabId;
+  let text = '', color = '#6366f1';
+  if (job.state === 'running') {
+    const pct = job.percentOverride != null
+      ? job.percentOverride
+      : (job.total ? Math.floor((job.done / job.total) * 100) : 0);
+    text = `${pct}%`;
+    color = '#f59e0b';
+  } else if (job.state === 'done') { text = '✓'; color = '#10b981'; }
+  else if (job.state === 'error') { text = '!'; color = '#ef4444'; }
+  else return;
+  const o = tabId ? { tabId } : {};
+  chrome.action.setBadgeBackgroundColor({ ...o, color }).catch(() => {});
+  chrome.action.setBadgeText({ ...o, text }).catch(() => {});
+}
+
+async function maybeCloseOffscreen() {
+  const job = await getJob();
+  if (job && job.state === 'running') return;
+  const blobs = (await chrome.storage.session.get(BLOBS_KEY))[BLOBS_KEY] || {};
+  if (Object.keys(blobs).length) return; // a blob-backed download is still being written
+  if (await hasOffscreen()) chrome.offscreen.closeDocument().catch(() => {});
+}
+
+async function startJob(job, tabId) {
+  const current = await getJob();
+  if (current && current.state === 'running') {
+    if (await hasOffscreen()) return { ok: false, error: 'A download job is already running' };
+    // stale state (e.g. extension reloaded mid-job) — fall through and replace it
+  }
+  if (!job.items?.length) return { ok: false, error: 'Nothing to download' };
+
+  await chrome.storage.session.set({
+    [JOB_KEY]: {
+      id: Date.now(), mode: job.mode, state: 'running', phase: 'Starting',
+      total: job.items.length, done: 0, failed: 0, message: '', tabId, startedAt: Date.now()
+    }
+  });
+  await ensureOffscreen();
+  const res = await chrome.runtime.sendMessage({ target: 'offscreen', action: 'runJob', job }).catch(e => ({ ok: false, error: e.message }));
+  if (!res?.ok) {
+    await updateJob({ state: 'error', message: res?.error || 'Background worker did not start' });
+    return { ok: false, error: res?.error || 'Background worker did not start' };
+  }
+  return { ok: true };
+}
+
+async function cancelJob() {
+  if (await hasOffscreen()) {
+    await chrome.runtime.sendMessage({ target: 'offscreen', action: 'cancelJob' }).catch(() => {});
+  } else {
+    await updateJob({ state: 'cancelled', message: 'Cancelled' });
+  }
+}
+
+async function jobDownload({ url, filename, saveAs, isBlob }) {
+  try {
+    let finalUrl = url;
+    if (!isBlob) {
+      finalUrl = url.includes('pinimg.com/videos')
+        ? await resolveValidPinterestDownloadUrl(url)
+        : await resolveOriginalImageUrl(url);
+    }
+    const id = await chrome.downloads.download({
+      url: finalUrl, filename, saveAs: !!saveAs, conflictAction: 'uniquify'
+    });
+    if (isBlob && id != null) {
+      const blobs = (await chrome.storage.session.get(BLOBS_KEY))[BLOBS_KEY] || {};
+      blobs[id] = url;
+      await chrome.storage.session.set({ [BLOBS_KEY]: blobs });
+    }
+    return { ok: id != null, id };
+  } catch (err) {
+    return { ok: false, error: String(err?.message || err) };
+  }
+}
+
+// Free blob memory once the browser has finished writing the file
+chrome.downloads.onChanged.addListener(async delta => {
+  const st = delta.state?.current;
+  if (st !== 'complete' && st !== 'interrupted') return;
+  const blobs = (await chrome.storage.session.get(BLOBS_KEY))[BLOBS_KEY] || {};
+  const blobUrl = blobs[delta.id];
+  if (!blobUrl) return;
+  delete blobs[delta.id];
+  await chrome.storage.session.set({ [BLOBS_KEY]: blobs });
+  chrome.runtime.sendMessage({ target: 'offscreen', action: 'revokeBlob', url: blobUrl }).catch(() => {});
+  maybeCloseOffscreen();
+});
+
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (!msg || msg.target === 'offscreen') return false;
+
+  if (msg.action === 'startJob') {
+    startJob(msg.job, msg.tabId).then(sendResponse);
+    return true;
+  }
+  if (msg.action === 'cancelJob') {
+    cancelJob().then(() => sendResponse({ ok: true }));
+    return true;
+  }
+  if (msg.action === 'jobProgress') {
+    updateJob(msg.patch || {}).then(() => sendResponse({ ok: true }));
+    return true;
+  }
+  if (msg.action === 'jobDownload') {
+    jobDownload(msg).then(sendResponse);
+    return true;
+  }
+  return false;
+});

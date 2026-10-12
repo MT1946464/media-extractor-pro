@@ -86,9 +86,27 @@ const tabImgCount        = $('tabImgCount');
 const tabVidCount        = $('tabVidCount');
 const tabAudCount        = $('tabAudCount');
 
+// Rule filters & background job bar
+const rulesToggle        = $('rulesToggle');
+const rulesPanel         = $('rulesPanel');
+const rulesEnabledCb     = $('rulesEnabled');
+const rulesList          = $('rulesList');
+const rulesCount         = $('rulesCount');
+const rulesMatchInfo     = $('rulesMatchInfo');
+const addRuleBtn         = $('addRuleBtn');
+const clearRulesBtn      = $('clearRulesBtn');
+const jobBar             = $('jobBar');
+const jobText            = $('jobText');
+const jobFill            = $('jobFill');
+const jobCancel          = $('jobCancel');
+const jobDismiss         = $('jobDismiss');
+
 // ── Init ──────────────────────────────────────
-document.addEventListener('DOMContentLoaded', () => {
+document.addEventListener('DOMContentLoaded', async () => {
   setupListeners();
+  await loadRules();
+  setupRuleListeners();
+  initJobStatus();
   try {
     const manifest = chrome.runtime.getManifest();
     $('aboutAppVer').innerHTML = `Version ${manifest.version} &nbsp;·&nbsp; Manifest V3`;
@@ -333,6 +351,15 @@ function applyFilters(silent = false) {
         return ext === activeAudType;
       });
     }
+  }
+
+  // Custom URL / size rules (AND / OR)
+  const beforeRules = result.length;
+  if (rulesActive()) {
+    result = result.filter(evalRules);
+    rulesMatchInfo.textContent = `${result.length} of ${beforeRules} match`;
+  } else {
+    rulesMatchInfo.textContent = '';
   }
 
   // Dimension Slider Filter (applies to images & videos)
@@ -905,108 +932,314 @@ function setupListeners() {
   });
 }
 
-// ── Download Handling ─────────────────────────
-async function handleDownloadAll() {
+// ── Download Handling (runs in the background) ─
+// Both bulk modes hand the list to the service worker, which runs the job in an
+// offscreen document — closing the popup doesn't stop it.
+function handleDownloadAll() { return startBackgroundJob('files'); }
+function handleDownloadZip() { return startBackgroundJob('zip'); }
+
+async function startBackgroundJob(mode) {
+  if (downloadIsRestricted) { showToast('Downloads not allowed on this platform', 'err'); return; }
+
   const toDownload = selected.size > 0
     ? filteredMedia.filter(i => selected.has(i.url))
     : filteredMedia;
+  if (!toDownload.length) { showToast('Nothing to download', 'err'); return; }
 
-  if (!toDownload.length) { showToast('No download-eligible media', 'err'); return; }
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true }).catch(() => []);
+  const job = {
+    mode,
+    items: toDownload.map(i => ({ url: i.url, kind: currentTab })),
+    options: {
+      subfolder: subfolderInput?.value.trim() || 'media-extractor-pro',
+      renamePattern: renamePatternInput?.value.trim() || '',
+      convertWebp: !!convertWebpCheck?.checked,
+      saveAs: mode === 'zip'
+    }
+  };
 
-  showProgressToast(0, toDownload.length);
+  const res = await chrome.runtime.sendMessage({ action: 'startJob', job, tabId: tab?.id }).catch(e => ({ ok: false, error: e.message }));
+  if (!res?.ok) { showToast(res?.error || 'Could not start download', 'err'); return; }
+  showToast(`${mode === 'zip' ? 'Zipping' : 'Downloading'} ${toDownload.length} file${toDownload.length !== 1 ? 's' : ''} in the background — you can close this popup`, 'ok');
+}
 
-  for (let i = 0; i < toDownload.length; i++) {
-    await downloadSingle(toDownload[i].url, i + 1);
-    showProgressToast(i + 1, toDownload.length);
-    if (i < toDownload.length - 1) await sleep(280);
+// ── Background Job Status ─────────────────────
+const JOB_KEY = 'mepJob';
+
+async function initJobStatus() {
+  try {
+    const data = await chrome.storage.session.get(JOB_KEY);
+    renderJob(data[JOB_KEY]);
+  } catch {}
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area === 'session' && changes[JOB_KEY]) renderJob(changes[JOB_KEY].newValue);
+  });
+  jobCancel.addEventListener('click', () => {
+    chrome.runtime.sendMessage({ action: 'cancelJob' }).catch(() => {});
+    jobText.textContent = 'Cancelling…';
+  });
+  jobDismiss.addEventListener('click', async () => {
+    const data = await chrome.storage.session.get(JOB_KEY).catch(() => ({}));
+    const job = data[JOB_KEY];
+    if (job && job.state !== 'running') await chrome.storage.session.set({ [JOB_KEY]: { ...job, dismissed: true } });
+  });
+}
+
+function renderJob(job) {
+  const running = !!job && job.state === 'running';
+  // Don't let a second bulk job start while one is running
+  if (!downloadIsRestricted) {
+    downloadBtn.disabled = running;
+    downloadZipBtn.disabled = running;
+    downloadBtn.style.opacity = running ? '0.5' : '';
+    downloadZipBtn.style.opacity = running ? '0.5' : '';
+  }
+
+  if (!job || job.dismissed) { jobBar.className = 'job-bar'; return; }
+
+  const label = job.mode === 'zip' ? 'ZIP' : 'Download';
+  let pct, text;
+  if (running) {
+    pct = job.percentOverride != null ? job.percentOverride : (job.total ? Math.round((job.done / job.total) * 100) : 0);
+    text = job.phase === 'Compressing' || job.phase === 'Saving'
+      ? `${label} · ${job.phase}… ${job.phase === 'Compressing' ? pct + '%' : ''}`
+      : `${label} · ${job.phase || 'Working'} ${job.done}/${job.total}${job.failed ? ` · ${job.failed} failed` : ''}`;
+  } else {
+    pct = 100;
+    text = job.message || (job.state === 'done' ? 'Finished' : job.state);
+  }
+
+  jobBar.className = 'job-bar visible' + (job.state === 'done' ? ' done' : (job.state === 'error' || job.state === 'cancelled') ? ' error' : '');
+  jobText.textContent = text;
+  jobText.title = text;
+  jobFill.style.width = `${pct}%`;
+  jobCancel.style.display = running ? '' : 'none';
+  jobDismiss.style.display = running ? 'none' : '';
+}
+
+// ── Rule Filters (URL / size, AND / OR) ───────
+const RULES_KEY = 'mepRules';
+const RULE_FIELDS = [
+  { id: 'url',      label: 'URL',          kind: 'text' },
+  { id: 'filename', label: 'File name',    kind: 'text' },
+  { id: 'alt',      label: 'Alt / title',  kind: 'text' },
+  { id: 'type',     label: 'File type',    kind: 'text' },
+  { id: 'size',     label: 'Size (px)',    kind: 'num'  },
+  { id: 'width',    label: 'Width (px)',   kind: 'num'  },
+  { id: 'height',   label: 'Height (px)',  kind: 'num'  }
+];
+const TEXT_OPS = [
+  { id: 'starts',      label: 'starts with' },
+  { id: 'contains',    label: 'contains' },
+  { id: 'ends',        label: 'ends with' },
+  { id: 'equals',      label: 'equals' },
+  { id: 'notcontains', label: "doesn't contain" },
+  { id: 'notstarts',   label: "doesn't start" },
+  { id: 'regex',       label: 'matches regex' }
+];
+const NUM_OPS = [
+  { id: 'gte', label: '≥' }, { id: 'lte', label: '≤' },
+  { id: 'gt',  label: '>' }, { id: 'lt',  label: '<' }, { id: 'eq', label: '=' }
+];
+
+let rules = [];
+let rulesEnabled = false;
+const regexCache = new Map();
+
+function newRule(join = 'AND') { return { join, field: 'url', op: 'starts', value: '' }; }
+function fieldKind(fieldId) { return (RULE_FIELDS.find(f => f.id === fieldId) || RULE_FIELDS[0]).kind; }
+function activeRules() { return rules.filter(r => String(r.value).trim() !== ''); }
+function rulesActive() { return rulesEnabled && activeRules().length > 0; }
+
+async function loadRules() {
+  try {
+    const data = await chrome.storage.local.get(RULES_KEY);
+    const saved = data[RULES_KEY];
+    if (saved && Array.isArray(saved.rules)) {
+      rules = saved.rules;
+      rulesEnabled = !!saved.enabled;
+    }
+  } catch {}
+  if (!rules.length) rules = [newRule()];
+  rulesEnabledCb.checked = rulesEnabled;
+  renderRules();
+  updateRulesBadge();
+}
+
+let saveTimer;
+function saveRules() {
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(() => {
+    chrome.storage.local.set({ [RULES_KEY]: { enabled: rulesEnabled, rules } }).catch(() => {});
+  }, 250);
+  updateRulesBadge();
+}
+
+function updateRulesBadge() {
+  const n = rulesEnabled ? activeRules().length : 0;
+  rulesCount.textContent = n || '';
+  rulesCount.classList.toggle('visible', n > 0);
+}
+
+function optionsHtml(list, selectedId) {
+  return list.map(o => `<option value="${o.id}"${o.id === selectedId ? ' selected' : ''}>${esc(o.label)}</option>`).join('');
+}
+
+function renderRules() {
+  rulesList.innerHTML = '';
+  rules.forEach((rule, idx) => {
+    const kind = fieldKind(rule.field);
+    const ops = kind === 'num' ? NUM_OPS : TEXT_OPS;
+    if (!ops.some(o => o.id === rule.op)) rule.op = ops[0].id;
+
+    const row = document.createElement('div');
+    row.className = 'rule-row';
+    row.innerHTML = `
+      ${idx === 0
+        ? '<span class="rule-where">Where</span>'
+        : `<select class="rule-join" title="How this rule combines with the one above">
+             <option value="AND"${rule.join !== 'OR' ? ' selected' : ''}>AND</option>
+             <option value="OR"${rule.join === 'OR' ? ' selected' : ''}>OR</option>
+           </select>`}
+      <select class="rule-field">${optionsHtml(RULE_FIELDS, rule.field)}</select>
+      <select class="rule-op">${optionsHtml(ops, rule.op)}</select>
+      <input class="rule-value" type="${kind === 'num' ? 'number' : 'text'}" ${kind === 'num' ? 'min="0" step="1"' : ''}
+             placeholder="${kind === 'num' ? 'e.g. 50' : 'e.g. https://www.example.com/attachments'}"
+             spellcheck="false" autocomplete="off" />
+      <button class="rule-del" title="Remove rule">✕</button>`;
+
+    const valueInput = row.querySelector('.rule-value');
+    valueInput.value = rule.value;
+    markRegexValidity(valueInput, rule);
+
+    row.querySelector('.rule-join')?.addEventListener('change', e => { rule.join = e.target.value; onRulesChanged(); });
+    row.querySelector('.rule-field').addEventListener('change', e => {
+      const wasKind = fieldKind(rule.field);
+      rule.field = e.target.value;
+      if (fieldKind(rule.field) !== wasKind) { rule.value = ''; rule.op = (fieldKind(rule.field) === 'num' ? NUM_OPS : TEXT_OPS)[0].id; }
+      renderRules();
+      onRulesChanged();
+    });
+    row.querySelector('.rule-op').addEventListener('change', e => {
+      rule.op = e.target.value;
+      markRegexValidity(valueInput, rule);
+      onRulesChanged();
+    });
+    valueInput.addEventListener('input', e => {
+      rule.value = e.target.value;
+      markRegexValidity(valueInput, rule);
+      onRulesChanged();
+    });
+    row.querySelector('.rule-del').addEventListener('click', () => {
+      rules.splice(idx, 1);
+      if (!rules.length) rules.push(newRule());
+      renderRules();
+      onRulesChanged();
+    });
+
+    rulesList.appendChild(row);
+  });
+}
+
+function markRegexValidity(input, rule) {
+  input.classList.toggle('invalid', rule.op === 'regex' && rule.value !== '' && !getRegex(rule.value));
+}
+
+function onRulesChanged() {
+  saveRules();
+  applyFilters();
+}
+
+function setupRuleListeners() {
+  rulesToggle.addEventListener('click', () => {
+    rulesPanel.classList.toggle('open');
+    rulesToggle.classList.toggle('active');
+  });
+  rulesEnabledCb.addEventListener('change', () => {
+    rulesEnabled = rulesEnabledCb.checked;
+    onRulesChanged();
+  });
+  addRuleBtn.addEventListener('click', () => {
+    rules.push(newRule('AND'));
+    renderRules();
+    rulesList.lastElementChild?.querySelector('.rule-value')?.focus();
+    saveRules();
+  });
+  clearRulesBtn.addEventListener('click', () => {
+    rules = [newRule()];
+    renderRules();
+    onRulesChanged();
+  });
+}
+
+function getRegex(src) {
+  if (regexCache.has(src)) return regexCache.get(src);
+  let re = null;
+  try { re = new RegExp(src, 'i'); } catch {}
+  regexCache.set(src, re);
+  return re;
+}
+
+function ruleFieldValue(field, item) {
+  switch (field) {
+    case 'url':      return item.url || '';
+    case 'filename': {
+      let path = '';
+      try { path = new URL(item.url).pathname; } catch { path = (item.url || '').split('?')[0]; }
+      const seg = path.split('/').filter(Boolean).pop() || '';
+      try { return decodeURIComponent(seg); } catch { return seg; }
+    }
+    case 'alt':      return item.alt || item.title || '';
+    case 'type':     return (item.type && item.type !== 'unknown') ? item.type : getExt(item.url || '');
+    case 'width':    return item.width || 0;
+    case 'height':   return item.height || 0;
+    case 'size':     return Math.max(item.width || 0, item.height || 0);
+    default:         return '';
   }
 }
 
-// ── One-Click Bulk "Download as ZIP" ──────────
-async function handleDownloadZip() {
-  if (typeof JSZip === 'undefined') {
-    showToast('ZIP library loading...', 'err');
-    return;
-  }
-
-  const toDownload = selected.size > 0
-    ? filteredMedia.filter(i => selected.has(i.url))
-    : filteredMedia;
-
-  if (!toDownload.length) { showToast('No media selected for ZIP', 'err'); return; }
-
-  const zip = new JSZip();
-  const subfolder = subfolderInput?.value.trim() || 'media-extractor-pro';
-  const shouldConvertWebp = convertWebpCheck?.checked || false;
-
-  showProgressToast(0, toDownload.length, 'Packaging ZIP archive...');
-
-  let addedCount = 0;
-  for (let i = 0; i < toDownload.length; i++) {
-    const item = toDownload[i];
-    let downloadUrl = item.url;
-
-    // Resolve Pinterest alternative if needed
-    if (downloadUrl.includes('pinimg.com/videos')) {
-      const alts = getPinterestAlternativeUrls(downloadUrl);
-      for (const alt of alts) {
-        try {
-          const resp = await fetch(alt, { method: 'HEAD' });
-          const ctype = resp.headers.get('content-type') || '';
-          if (resp.ok && (ctype.includes('video') || ctype.includes('octet-stream') || !ctype.includes('xml'))) {
-            downloadUrl = alt;
-            break;
-          }
-        } catch {}
-      }
+function testRule(rule, item) {
+  const raw = ruleFieldValue(rule.field, item);
+  if (fieldKind(rule.field) === 'num') {
+    const v = Number(raw) || 0;
+    const target = Number(rule.value);
+    if (Number.isNaN(target)) return false;
+    switch (rule.op) {
+      case 'gte': return v >= target;
+      case 'lte': return v <= target;
+      case 'gt':  return v >  target;
+      case 'lt':  return v <  target;
+      case 'eq':  return v === target;
     }
-
-    try {
-      const resp = await fetch(downloadUrl);
-      if (!resp.ok) continue;
-
-      let blob = await resp.blob();
-      let originalFilename = getFilename(downloadUrl);
-      let ext = getExt(downloadUrl);
-
-      // Offline WebP/AVIF to JPG transcoding inside ZIP
-      if (shouldConvertWebp && (ext === 'webp' || ext === 'avif')) {
-        try {
-          blob = await convertImageBlob(blob, 'image/jpeg', 0.95);
-          originalFilename = originalFilename.replace(/\.(webp|avif)$/i, '.jpg');
-        } catch {}
-      }
-
-      if (currentTab === 'videos' && (ext === 'unknown' || ext === 'cmfv' || ext === 'bin')) {
-        originalFilename = originalFilename.replace(/\.[^.]+$/, '') + '.mp4';
-      }
-
-      zip.file(originalFilename, blob);
-      addedCount++;
-    } catch {}
-
-    showProgressToast(i + 1, toDownload.length, `Archiving: ${i + 1} / ${toDownload.length}`);
-    if (i < toDownload.length - 1) await sleep(50);
+    return false;
   }
-
-  if (addedCount === 0) {
-    showToast('Failed to fetch media for ZIP', 'err');
-    return;
+  const hay = String(raw).toLowerCase();
+  const needle = String(rule.value).trim().toLowerCase();
+  switch (rule.op) {
+    case 'starts':      return hay.startsWith(needle);
+    case 'contains':    return hay.includes(needle);
+    case 'ends':        return hay.endsWith(needle);
+    case 'equals':      return hay === needle;
+    case 'notcontains': return !hay.includes(needle);
+    case 'notstarts':   return !hay.startsWith(needle);
+    case 'regex': {
+      const re = getRegex(String(rule.value).trim());
+      return re ? re.test(String(raw)) : false;
+    }
   }
+  return false;
+}
 
-  showToast('Generating final ZIP file...', 'ok');
-  const zipBlob = await zip.generateAsync({ type: 'blob', compression: 'DEFLATE', compressionOptions: { level: 6 } });
-
-  const reader = new FileReader();
-  reader.onloadend = () => {
-    chrome.downloads.download({
-      url: reader.result,
-      filename: `${subfolder}.zip`,
-      saveAs: true
-    });
-    showToast(`🎉 Packaged all ${addedCount} files into ${subfolder}.zip!`, 'ok');
-  };
-  reader.readAsDataURL(zipBlob);
+// AND binds tighter than OR: split into OR-groups, each group must fully match.
+function evalRules(item) {
+  const list = activeRules();
+  if (!list.length) return true;
+  const groups = [[]];
+  list.forEach((r, i) => {
+    if (i > 0 && r.join === 'OR') groups.push([]);
+    groups[groups.length - 1].push(r);
+  });
+  return groups.some(g => g.every(r => testRule(r, item)));
 }
 
 function showProgressToast(current, total, prefix = 'Downloading') {
@@ -1267,6 +1500,8 @@ function showToast(msg, type = '') {
 // ── Helpers ───────────────────────────────────
 function getFilename(url) {
   try {
+    const xf = url.split('?')[0].match(/\/attachments\/([^/]+)-([a-z0-9]{2,5})\.(\d+)\/?$/i);
+    if (xf) return `${xf[1]}_${xf[3]}.${xf[2].toLowerCase()}`;
     const name = url.split('?')[0].split('/').pop();
     if (name && /\.\w{2,5}$/.test(name)) return name;
   } catch {}
@@ -1275,6 +1510,8 @@ function getFilename(url) {
 
 function getExt(url) {
   try {
+    const xf = url.split('?')[0].match(/\/attachments\/[^/]+-([a-z0-9]{2,5})\.\d+\/?$/i);
+    if (xf) return xf[1].toLowerCase() === 'jpeg' ? 'jpg' : xf[1].toLowerCase();
     const ext = url.split('?')[0].split('.').pop().toLowerCase();
     return [...imageExts, ...videoExts, ...audioExts].includes(ext) ? ext : 'unknown';
   } catch { return 'unknown'; }

@@ -216,6 +216,12 @@
     </label>
     <span class="sel-count" id="selCount">0 selected</span>
     <div style="display: flex; gap: 6px;">
+      <button class="txt-btn" id="rulesToggle" title="URL / size rules (AND / OR)">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="14" height="14">
+          <polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/>
+        </svg>
+        <span class="rules-count" id="rulesCount"></span>
+      </button>
       <button class="txt-btn" id="optionsToggle" title="Settings, Filters & Folder Options">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="14" height="14">
           <circle cx="12" cy="12" r="3"/>
@@ -261,6 +267,24 @@
     </div>
   </div>
 
+  <!-- ── Rule Filter Panel ─────────────────── -->
+  <div class="rules-panel" id="rulesPanel">
+    <div class="rules-head">
+      <label class="check-label">
+        <input type="checkbox" id="rulesEnabled" />
+        <span class="check-custom"></span>
+        <span>Only keep files matching these rules</span>
+      </label>
+      <span class="rules-match" id="rulesMatchInfo"></span>
+    </div>
+    <div class="rules-list" id="rulesList"></div>
+    <div class="rules-actions">
+      <button class="txt-btn rules-add" id="addRuleBtn">+ Add rule</button>
+      <button class="txt-btn rules-clear" id="clearRulesBtn">Clear all</button>
+    </div>
+    <p class="rules-hint">AND is checked before OR: <code>A OR B AND C</code> means <code>A OR (B AND C)</code>. Images whose size isn't known yet count as 0px. Rules are saved and apply to every page.</p>
+  </div>
+
   <!-- ── Grid / List ─────────────────────── -->
   <main class="gallery" id="gallery">
     <!-- Loading -->
@@ -281,6 +305,16 @@
     <!-- Media grid -->
     <div class="image-grid" id="imageGrid"></div>
   </main>
+
+  <!-- ── Background Job Status ──────────── -->
+  <div class="job-bar" id="jobBar">
+    <div class="job-top">
+      <span class="job-text" id="jobText"></span>
+      <button class="job-btn" id="jobCancel" title="Stop this job">Cancel</button>
+      <button class="job-btn" id="jobDismiss" title="Hide">✕</button>
+    </div>
+    <div class="job-track"><div class="job-fill" id="jobFill"></div></div>
+  </div>
 
   <!-- ── Bottom Bar ─────────────────────── -->
   <footer class="bottom-bar">

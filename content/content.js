@@ -123,7 +123,7 @@
         alt: extra.alt || '',
         width: extra.width || 0,
         height: extra.height || 0,
-        type: imageExts.includes(ext) ? ext : 'unknown',
+        type: extra.type || (imageExts.includes(ext) ? ext : 'unknown'),
         source: extra.source || 'img',
       });
     }
@@ -159,6 +159,19 @@
       if (href && new RegExp(`\\.(${imageExts.join('|')})(\\?|$)`, 'i').test(href)) {
         addImage(href, { source: 'link' });
       }
+    });
+
+    // 3b. Forum attachment links with no real file extension
+    //     (XenForo style: /attachments/some-name-jpg.123456/)
+    document.querySelectorAll('a[href*="/attachments/"]').forEach(a => {
+      const m = a.href.match(/\/attachments\/[^/?#]+-(jpe?g|png|gif|webp|avif|bmp)\.\d+\/?(?:[?#]|$)/i);
+      if (!m) return;
+      const thumb = a.querySelector('img');
+      addImage(a.href, {
+        source: 'attachment',
+        type: m[1].toLowerCase().replace('jpeg', 'jpg'),
+        alt: thumb?.alt || a.title || ''
+      });
     });
 
     // 4. CSS background-image

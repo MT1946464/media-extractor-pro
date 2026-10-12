@@ -917,3 +917,87 @@ body {
 }
 
 
+
+/* ── Rule Filter Panel ───────────────────── */
+#rulesToggle { position: relative; }
+.rules-count {
+  position: absolute; top: -4px; right: -4px;
+  min-width: 14px; height: 14px; padding: 0 3px;
+  border-radius: 7px; background: var(--p1); color: #fff;
+  font-size: 9px; font-weight: 700; line-height: 14px; text-align: center;
+  display: none;
+}
+.rules-count.visible { display: block; }
+.rules-panel {
+  display: none;
+  background: var(--bg1);
+  border-bottom: 1px solid var(--b0);
+  padding: 10px 14px;
+  max-height: 240px;
+  overflow-y: auto;
+}
+.rules-panel.open { display: block; }
+.rules-head {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 8px; margin-bottom: 8px;
+}
+.rules-head .check-label { font-size: 11px; font-weight: 600; }
+.rules-match { font-size: 10px; color: var(--t3); white-space: nowrap; }
+.rules-list { display: flex; flex-direction: column; gap: 6px; }
+.rule-row {
+  display: grid;
+  grid-template-columns: 54px 92px 98px 1fr 22px;
+  gap: 4px; align-items: center;
+}
+.rule-row select, .rule-row input {
+  font-size: 11px; padding: 5px 6px;
+  background: var(--bg0); color: var(--t1);
+  border: 1px solid var(--b1); border-radius: var(--r1);
+  min-width: 0; outline: none;
+}
+.rule-row input:focus, .rule-row select:focus { border-color: var(--p1); }
+.rule-row input.invalid { border-color: var(--err); }
+.rule-row .rule-where {
+  font-size: 10px; font-weight: 700; color: var(--t3);
+  text-transform: uppercase; letter-spacing: 0.5px; text-align: center;
+}
+.rule-row select.rule-join { font-weight: 700; color: var(--p2); }
+.rule-del {
+  width: 22px; height: 22px; border: none; border-radius: var(--r1);
+  background: transparent; color: var(--t3); cursor: pointer; font-size: 13px;
+}
+.rule-del:hover { background: var(--bg4); color: var(--err); }
+.rules-actions { display: flex; gap: 6px; margin-top: 8px; }
+.rules-actions .txt-btn { width: auto; font-size: 11px; font-weight: 600; padding: 4px 8px; }
+.rules-hint { margin-top: 8px; font-size: 10px; color: var(--t3); line-height: 1.45; }
+.rules-hint code { background: var(--bg4); padding: 0 3px; border-radius: 3px; font-size: 10px; }
+
+/* ── Background Job Bar ──────────────────── */
+.job-bar {
+  display: none;
+  padding: 8px 14px;
+  border-top: 1px solid var(--b0);
+  background: var(--bg1);
+}
+.job-bar.visible { display: block; }
+.job-top { display: flex; align-items: center; gap: 6px; }
+.job-text {
+  flex: 1; font-size: 11px; font-weight: 600; color: var(--t2);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.job-bar.done  .job-text { color: var(--ok); }
+.job-bar.error .job-text { color: var(--err); }
+.job-btn {
+  font-size: 10px; font-weight: 600; padding: 3px 8px;
+  border: 1px solid var(--b1); border-radius: var(--r1);
+  background: var(--bg0); color: var(--t2); cursor: pointer;
+}
+.job-btn:hover { border-color: var(--p1); color: var(--p1); }
+.job-track {
+  margin-top: 6px; height: 4px; border-radius: 2px;
+  background: var(--bg4); overflow: hidden;
+}
+.job-fill { height: 100%; width: 0; background: var(--pg); transition: width 0.25s ease; }
+.job-bar.done  .job-fill { background: var(--ok); }
+.job-bar.error .job-fill { background: var(--err); }
+.txt-btn.active { color: var(--p2); border-color: var(--p1); background: rgba(99,102,241,0.12); }
